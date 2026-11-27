@@ -1,20 +1,26 @@
 {
-  "name": "library-lending-system",
+  "name": "assignment-app",
   "version": "1.0.0",
-  "description": "Express middleware & validation for library lending system (book availability, holds, overdue reminders)",
+  "description": "Library lending system and React warehouse inventory manager",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test/test.js",
-    "demo": "node test/demo.js"
+    "test": "node test/react-inventory.test.js",
+    "test:library": "node test/test.js",
+    "test:react": "node test/react-inventory.test.js",
+    "demo:library": "node test/demo.js"
   },
   "keywords": [
     "express",
     "middleware",
     "validation",
-    "library-lending"
+    "library-lending",
+    "react",
+    "inventory-manager"
   ],
   "dependencies": {
-    "express": "^5.3.0"
+    "express": "^5.3.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
   }
 }
