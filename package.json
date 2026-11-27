@@ -1,17 +1,20 @@
 {
-  "name": "movie-discovery-api",
+  "name": "library-lending-system",
   "version": "1.0.0",
-  "private": true,
-  "description": "Express prototype for movie discovery, recommendations, and watchlists",
-  "main": "app.js",
+  "description": "Express middleware & validation for library lending system (book availability, holds, overdue reminders)",
+  "main": "src/server.js",
   "scripts": {
-    "start": "node app.js",
-    "test": "node --test"
+    "start": "node src/server.js",
+    "test": "node test/test.js",
+    "demo": "node test/demo.js"
   },
-  "engines": {
-    "node": ">=18"
-  },
+  "keywords": [
+    "express",
+    "middleware",
+    "validation",
+    "library-lending"
+  ],
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^5.3.0"
   }
 }
