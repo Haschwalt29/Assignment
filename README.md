@@ -1,79 +1,275 @@
-# Clinic appointment data model
+# Library Lending System: Express Middleware, Validation & Error Handling
 
-This design uses MongoDB for a clinic appointment portal and defines two collections:
+An Express API built specifically for a library lending system supporting **book availability checks**, **placing holds**, and **overdue reminder dispatches**.
 
-- `patients`: minimal contact information and an active flag.
-- `appointments`: scheduling metadata linked to a patient and a clinician.
+The system demonstrates:
+- **Custom Middleware**: Request ID generation and tracing (`X-Request-Id`) combined with structured JSON latency and access logging.
+- **Route Input Validation**: Parameter and request body validation rejecting malformed inputs before reaching business logic.
+- **Centralized Error Handling**: A unified four-argument Express error middleware (`(err, req, res, next)`) returning predictable, standardized JSON error responses.
+- **Demonstration**: Suite of unit/integration tests and an interactive demonstration runner showcasing valid and invalid scenarios.
 
-The runnable schema and index setup is in [`mongo/setup.js`](./mongo/setup.js).
+---
 
-## Setup
+## Architecture & Endpoints
 
-Requirements: MongoDB 6.0+ and `mongosh`.
+| Method | Endpoint | Description | Validation Highlights |
+|---|---|---|---|
+| `GET` | `/books/:bookId/availability` | Checks real-time stock, hold count, and checkout eligibility | `bookId` parameter format (`book-<id>`) |
+| `POST` | `/holds` | Reserves a copy for a patron | `bookId`, `patronId` format, `pickupLocation` whitelist, duplicate hold checks |
+| `POST` | `/reminders/overdue` | Triggers batch overdue reminder notices | `daysOverdueMin` (positive integer 1–365), `notificationChannel` (`email`, `sms`, `in-app`) |
+| `GET` | `/health` | Health check probe | None |
 
-Start a local MongoDB server, then run:
+---
 
-```powershell
-mongosh "mongodb://127.0.0.1:27017" --file mongo\setup.js
+## Design Decisions
+
+1. **Request Tracking & Structured Logging Middleware**:
+   - Every request is tagged with an `X-Request-Id` header. If a client forwards an `X-Request-Id` (e.g. from an API gateway), it is preserved; otherwise, a cryptographic UUID (`crypto.randomUUID()`) is generated.
+   - The response completion event (`res.on('finish')`) measures nanosecond-precision execution duration and prints a structured JSON log entry containing timestamp, request ID, method, path, HTTP status, and duration.
+   - The `requestId` is propagated into every successful and error JSON response body to enable end-to-end tracing.
+
+2. **Layered Validation Middleware**:
+   - Each route is protected by a dedicated validation middleware before business handlers execute.
+   - Validation checks formats (e.g. `book-101`, `patron-42`), enum domains (e.g. allowed pickup locations, supported notification channels), and numeric ranges (`daysOverdueMin`).
+   - If invalid, the validator stops execution and forwards a formatted error object to `next(err)` containing an HTTP `400` status, error code, and detailed field-by-field validation failure reasons.
+
+3. **Centralized Error Handling**:
+   - Single four-parameter error handling middleware `(err, req, res, next)` at the bottom of the middleware chain.
+   - Handles operational business errors (400 Bad Request, 404 Not Found, 409 Conflict) and technical errors (malformed JSON syntax, 500 internal errors) identically.
+   - Sanitizes production responses while logging structured error stacks for observability.
+
+4. **In-Memory Lending Domain**:
+   - Implements business logic including stock availability checks, hold queue management with priority ranking, duplicate hold rejection (409 Conflict), and overdue loan filtering based on loan due dates.
+
+---
+
+## Setup & Running
+
+### Requirements
+- Node.js `v18+` (tested on `v22.15.0`)
+- Express 5.x (installed in dependencies)
+
+### Installation
+Dependencies are already configured. If needed:
+```bash
+npm install
 ```
 
-The script targets the `clinic_portal` database. It creates the collections with strict validators, or applies the validators to existing collections, and creates the two appointment indexes. Run it using a database account with permission to create/modify collections and indexes.
-
-## Schema and relationship decisions
-
-Patient documents contain only a preferred name and E.164 phone number needed for booking and contact. `active` supports deactivation without deleting a record that may have appointment history. Appointment documents store `patientId` and `clinicianId` as ObjectId references rather than embedding patient details, avoiding duplicated contact data and reducing its exposure in appointment reads.
-
-MongoDB has no built-in foreign keys: the application must confirm that the referenced patient and clinician exist and that the patient is active when booking. The validators enforce BSON types, required fields, allowed appointment statuses, bounded names, and phone format; `additionalProperties: false` rejects accidental extra fields such as free-text clinical notes. Application logic must additionally enforce `startAt < endAt`, authorization, and any scheduling/overlap rules.
-
-Keep authentication and authorization enabled, use least-privilege database credentials and TLS, and avoid logging patient documents or contact details. Define retention and access policies for the clinic's applicable privacy requirements; schema validation alone is not a privacy or authorization control.
-
-## Indexes
-
-1. `{ patientId: 1, startAt: -1 }` (`patient_appointment_history`) improves a patient's appointment-history query, e.g. `find({ patientId }).sort({ startAt: -1 })`. The patient equality prefix also scopes the descending time order. The trade-off is additional storage and write cost for each appointment, and queries without `patientId` cannot efficiently use this index for time ordering.
-2. `{ clinicianId: 1, status: 1, startAt: 1 }` (`clinician_schedule_by_status_and_time`) improves schedule lookups such as `find({ clinicianId, status: "booked", startAt: { $gte: from, $lt: to } }).sort({ startAt: 1 })`. Equality keys precede the time range. The trade-off is extra index maintenance/storage and that the index is optimized for the clinician-and-status prefix, not general time-only queries. It does not by itself prevent overlapping bookings.
-
-## Movie discovery Express prototype
-
-The Express prototype in [`app.js`](./app.js) is independent of the clinic MongoDB example above. It uses an in-memory sample catalog and watchlists; restarting the process resets watchlist changes. It demonstrates recommendation ranking, discovery filters, watchlist writes, request-ID/logging middleware, input validation, and centralized JSON errors.
-
-### Setup and tests
-
-Requirements: Node.js 18+ and npm.
-
-```powershell
-npm install
-npm test
+### Run Server
+```bash
 npm start
 ```
+The server will listen at `http://localhost:3000`.
 
-The API listens on port 3000 by default; set `PORT` to choose another port. Tests use Node's built-in test runner and exercise actual HTTP requests against an ephemeral local port.
+### Run Automated Tests
+```bash
+npm test
+```
+Executes the 12 integration test scenarios verifying validation rules, error handling, custom middleware, and business constraints.
 
-### Routes and assumptions
+### Run Demonstration Script
+```bash
+npm run demo
+```
+Runs an end-to-end demonstration script executing valid and invalid requests against all endpoints with formatted console output.
 
-- `GET /api/movies` supports `genre` (lowercase slug), `year` (1888-2100), `minRating` (0-10, one decimal place maximum), and `watchlistId`. Unknown/repeated filters are rejected. Results are filtered first, then ranked by a demo score: 75% catalog rating and 25% normalized popularity.
-- `POST /api/watchlists/:watchlistId/movies` accepts exactly `{ "movieId": "m1" }`. A watchlist is created when a movie is first added; duplicate additions return `409`.
-- The catalog, ratings, popularity values, and watchlists are demonstration fixtures, not production recommendation signals or persistent/user-owned data. Authentication, authorization, a database, pagination, and production-grade ranking are intentionally out of scope.
+---
 
-The request-ID middleware assigns each request a UUID in `X-Request-Id` and logs the ID, method, path, status, and duration without logging query values or bodies. The centralized error handler gives clients a consistent JSON error and request ID; unexpected failures are logged and returned as a generic `500`.
+## Valid and Invalid Request Demonstrations
 
-### Request examples
-
-Valid discovery/filter request:
-
-```powershell
-curl.exe "http://localhost:3000/api/movies?genre=drama&minRating=7.5"
+### 1. Book Availability
+#### Valid Request
+```bash
+curl -i -X GET http://localhost:3000/books/book-101/availability \
+  -H "X-Request-Id: client-trace-001"
+```
+**Response (200 OK):**
+```json
+{
+  "success": true,
+  "requestId": "client-trace-001",
+  "data": {
+    "bookId": "book-101",
+    "title": "Design Patterns",
+    "author": "Gang of Four",
+    "totalCopies": 3,
+    "availableCopies": 2,
+    "activeHoldCount": 0,
+    "isAvailableForCheckout": true,
+    "recommendation": "Available for immediate checkout."
+  }
+}
 ```
 
-Valid watchlist write:
-
-```powershell
-curl.exe -X POST "http://localhost:3000/api/watchlists/weekend/movies" -H "Content-Type: application/json" -d "{\"movieId\":\"m1\"}"
+#### Invalid Request (Malformed Book ID)
+```bash
+curl -i -X GET http://localhost:3000/books/invalid!id/availability
+```
+**Response (400 Bad Request):**
+```json
+{
+  "success": false,
+  "requestId": "a9564214-f574-4d20-a338-9566babdbb61",
+  "error": {
+    "code": "INVALID_BOOK_ID",
+    "message": "Invalid or missing 'bookId' parameter. Expected format: 'book-<id>' (e.g. 'book-101')."
+  }
+}
 ```
 
-Invalid request (`minRating` is above the allowed maximum) returns `400` with a JSON error and `X-Request-Id`:
+---
 
-```powershell
-curl.exe -i "http://localhost:3000/api/movies?minRating=11"
+### 2. Place Hold
+#### Valid Request
+```bash
+curl -i -X POST http://localhost:3000/holds \
+  -H "Content-Type: application/json" \
+  -d '{
+    "bookId": "book-102",
+    "patronId": "patron-202",
+    "pickupLocation": "Curbside Locker"
+  }'
+```
+**Response (201 Created):**
+```json
+{
+  "success": true,
+  "requestId": "fd201c13-8321-4716-a8cd-7349b408f9e9",
+  "message": "Hold placed successfully.",
+  "data": {
+    "holdId": "hold-1795761225837",
+    "bookTitle": "Clean Architecture",
+    "patronId": "patron-202",
+    "pickupLocation": "Curbside Locker",
+    "queuePosition": 2,
+    "createdAt": "2026-11-27T06:33:45.837Z"
+  }
+}
 ```
 
-The focused failure case is an out-of-range rating filter. The HTTP test asserts the `400`, validation message, and matching response/header request ID. The test suite also verifies a valid ranked filter, watchlist addition/filtering, invalid watchlist input, and request logging.
+#### Invalid Request (Validation Failures)
+```bash
+curl -i -X POST http://localhost:3000/holds \
+  -H "Content-Type: application/json" \
+  -d '{
+    "bookId": "invalid-book-code",
+    "patronId": "",
+    "pickupLocation": "Downtown Coffee Shop"
+  }'
+```
+**Response (400 Bad Request):**
+```json
+{
+  "success": false,
+  "requestId": "cec8a270-ded9-4ff5-8720-330fb4672c8e",
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Validation failed for hold request.",
+    "details": [
+      { "field": "bookId", "message": "Must be a valid book ID string in format 'book-<id>'." },
+      { "field": "patronId", "message": "Must be a valid patron ID string in format 'patron-<id>'." },
+      { "field": "pickupLocation", "message": "Must be one of the permitted pickup locations: Main Desk, North Branch, South Branch, Curbside Locker." }
+    ]
+  }
+}
+```
+
+#### Duplicate Hold Conflict
+```bash
+curl -i -X POST http://localhost:3000/holds \
+  -H "Content-Type: application/json" \
+  -d '{
+    "bookId": "book-102",
+    "patronId": "patron-202",
+    "pickupLocation": "Curbside Locker"
+  }'
+```
+**Response (409 Conflict):**
+```json
+{
+  "success": false,
+  "requestId": "3387afb3-b6ff-474a-8731-0dc5b879f377",
+  "error": {
+    "code": "HOLD_ALREADY_EXISTS",
+    "message": "Patron 'patron-202' already has an active hold for 'book-102'.",
+    "details": {
+      "existingHoldId": "hold-1795761225837",
+      "queuePosition": 2
+    }
+  }
+}
+```
+
+---
+
+### 3. Overdue Reminders
+#### Valid Request
+```bash
+curl -i -X POST http://localhost:3000/reminders/overdue \
+  -H "Content-Type: application/json" \
+  -d '{
+    "daysOverdueMin": 5,
+    "notificationChannel": "email"
+  }'
+```
+**Response (200 OK):**
+```json
+{
+  "success": true,
+  "requestId": "a632785e-e454-499e-a0a2-58b0c6788bbd",
+  "message": "Overdue reminders dispatched to 2 patron(s).",
+  "data": {
+    "criteria": {
+      "daysOverdueMin": 5,
+      "notificationChannel": "email",
+      "evaluatedAt": "2026-11-27T12:00:00.000Z"
+    },
+    "dispatchedCount": 2,
+    "dispatchedReminders": [
+      {
+        "loanId": "loan-1",
+        "patronId": "patron-12",
+        "patronEmail": "patron12@example.com",
+        "daysOverdue": 12,
+        "channel": "email",
+        "reminderSequence": 2,
+        "dispatchedAt": "2026-11-27T12:00:00.000Z"
+      },
+      {
+        "loanId": "loan-2",
+        "patronId": "patron-34",
+        "patronEmail": "patron34@example.com",
+        "daysOverdue": 7,
+        "channel": "email",
+        "reminderSequence": 1,
+        "dispatchedAt": "2026-11-27T12:00:00.000Z"
+      }
+    ]
+  }
+}
+```
+
+#### Invalid Request
+```bash
+curl -i -X POST http://localhost:3000/reminders/overdue \
+  -H "Content-Type: application/json" \
+  -d '{
+    "daysOverdueMin": -2,
+    "notificationChannel": "fax"
+  }'
+```
+**Response (400 Bad Request):**
+```json
+{
+  "success": false,
+  "requestId": "cb7ecceb-d70a-4ad2-81b2-3f15711af053",
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Validation failed for overdue reminder dispatch.",
+    "details": [
+      { "field": "daysOverdueMin", "message": "Must be an integer between 1 and 365." },
+      { "field": "notificationChannel", "message": "Must be one of allowed notification channels: email, sms, in-app." }
+    ]
+  }
+}
+```
