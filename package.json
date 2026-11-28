@@ -1,18 +1,19 @@
 {
-  "name": "library-lending-system",
+  "name": "recipe-planning-auth",
   "version": "1.0.0",
-  "description": "Express middleware & validation for library lending system (book availability, holds, overdue reminders)",
-  "main": "src/server.js",
+  "description": "JWT authentication and role/ownership authorization for recipe planning, ingredient substitutions, and grocery lists",
+  "main": "src/recipeApp.js",
   "scripts": {
-    "start": "node src/server.js",
-    "test": "node test/test.js",
-    "demo": "node test/demo.js"
+    "test": "node test/recipe-auth.test.js",
+    "test:all": "node test/recipe-auth.test.js && node test/test.js"
   },
   "keywords": [
-    "express",
-    "middleware",
-    "validation",
-    "library-lending"
+    "jwt",
+    "auth",
+    "authorization",
+    "recipe-planning",
+    "grocery-lists",
+    "ingredient-substitutions"
   ],
   "dependencies": {
     "express": "^5.3.0"

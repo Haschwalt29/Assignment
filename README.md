@@ -1,275 +1,116 @@
-# Library Lending System: Express Middleware, Validation & Error Handling
+# Recipe Planning App: Authentication & Authorization (JWT)
 
-An Express API built specifically for a library lending system supporting **book availability checks**, **placing holds**, and **overdue reminder dispatches**.
+A production-grade authentication and authorization prototype for a **Recipe Planning & Grocery List Management** service.
 
-The system demonstrates:
-- **Custom Middleware**: Request ID generation and tracing (`X-Request-Id`) combined with structured JSON latency and access logging.
-- **Route Input Validation**: Parameter and request body validation rejecting malformed inputs before reaching business logic.
-- **Centralized Error Handling**: A unified four-argument Express error middleware (`(err, req, res, next)`) returning predictable, standardized JSON error responses.
-- **Demonstration**: Suite of unit/integration tests and an interactive demonstration runner showcasing valid and invalid scenarios.
+The implementation specifically models:
+1. **Ingredient Substitutions**: Members can customize substitutions in their private grocery lists (e.g. replacing buttermilk with milk + lemon juice, or heavy cream with coconut cream); master substitutions can only be curated by verified `chef` roles.
+2. **Grocery Lists**: Private grocery lists tied to individual member accounts, protected by ownership checks (IDOR protection).
+3. **JWT Authentication & Authorization Flow**: Secure login, password hashing with salt, token expiration, role-based access control (RBAC), and resource ownership verification.
 
 ---
 
 ## Architecture & Endpoints
 
-| Method | Endpoint | Description | Validation Highlights |
+| Method | Endpoint | Protection | Description |
 |---|---|---|---|
-| `GET` | `/books/:bookId/availability` | Checks real-time stock, hold count, and checkout eligibility | `bookId` parameter format (`book-<id>`) |
-| `POST` | `/holds` | Reserves a copy for a patron | `bookId`, `patronId` format, `pickupLocation` whitelist, duplicate hold checks |
-| `POST` | `/reminders/overdue` | Triggers batch overdue reminder notices | `daysOverdueMin` (positive integer 1–365), `notificationChannel` (`email`, `sms`, `in-app`) |
-| `GET` | `/health` | Health check probe | None |
+| `POST` | `/api/auth/login` | Public | Validates email/password against salted PBKDF2 hash, issues signed JWT (1-hour expiry). |
+| `GET` | `/api/grocery-lists/:listId` | Authenticated + Ownership / Chef | Fetches grocery list with ingredients and substitutions. Restricted to list owner or `chef` role. |
+| `POST` | `/api/grocery-lists/:listId/substitute` | Authenticated + Owner Only | Replaces or substitutes an ingredient in the user's personal grocery list. |
+| `POST` | `/api/substitutions/curate` | Authenticated + Role: `chef` | Adds a verified culinary ingredient substitution to the global master catalog. |
 
 ---
 
-## Design Decisions
+## Implementation Details
 
-1. **Request Tracking & Structured Logging Middleware**:
-   - Every request is tagged with an `X-Request-Id` header. If a client forwards an `X-Request-Id` (e.g. from an API gateway), it is preserved; otherwise, a cryptographic UUID (`crypto.randomUUID()`) is generated.
-   - The response completion event (`res.on('finish')`) measures nanosecond-precision execution duration and prints a structured JSON log entry containing timestamp, request ID, method, path, HTTP status, and duration.
-   - The `requestId` is propagated into every successful and error JSON response body to enable end-to-end tracing.
+### 1. Password Hashing
+- File: [`src/recipeAuthUtils.js`](./src/recipeAuthUtils.js)
+- Implemented using **PBKDF2** with a 16-byte cryptographically secure random salt, 100,000 iterations, and SHA-512 digest (`crypto.pbkdf2Sync`).
+- Verification uses `crypto.timingSafeEqual` to eliminate timing attacks.
 
-2. **Layered Validation Middleware**:
-   - Each route is protected by a dedicated validation middleware before business handlers execute.
-   - Validation checks formats (e.g. `book-101`, `patron-42`), enum domains (e.g. allowed pickup locations, supported notification channels), and numeric ranges (`daysOverdueMin`).
-   - If invalid, the validator stops execution and forwards a formatted error object to `next(err)` containing an HTTP `400` status, error code, and detailed field-by-field validation failure reasons.
+### 2. JWT Generation & Expiry
+- Standard HMAC SHA-256 (`HS256`) signed tokens.
+- **Never commits secrets**: Loaded exclusively from `process.env.JWT_SECRET`. Falls back to an isolated ephemeral string strictly during non-production automated testing.
+- Configured default token lifetime of 3600 seconds (`exp = iat + 3600`).
+- Validates token signature with constant-time equality check and rejects tokens where `exp < now`.
 
-3. **Centralized Error Handling**:
-   - Single four-parameter error handling middleware `(err, req, res, next)` at the bottom of the middleware chain.
-   - Handles operational business errors (400 Bad Request, 404 Not Found, 409 Conflict) and technical errors (malformed JSON syntax, 500 internal errors) identically.
-   - Sanitizes production responses while logging structured error stacks for observability.
-
-4. **In-Memory Lending Domain**:
-   - Implements business logic including stock availability checks, hold queue management with priority ranking, duplicate hold rejection (409 Conflict), and overdue loan filtering based on loan due dates.
+### 3. Role & Ownership Checks
+- **Role Check** (`requireRole(['chef'])`): Validates that `req.user.role` matches required roles before allowing mutations to global culinary data.
+- **Ownership Check** (`requireListOwnershipOrChef`): Verifies `req.user.id === groceryList.ownerId` before allowing read or mutation of grocery lists, preventing Insecure Direct Object References (IDOR). Certified chefs can read lists for culinary guidance but cannot tamper with a user's items.
 
 ---
 
-## Setup & Running
+## Edge Case Demonstrations
 
-### Requirements
-- Node.js `v18+` (tested on `v22.15.0`)
-- Express 5.x (installed in dependencies)
-
-### Installation
-Dependencies are already configured. If needed:
-```bash
-npm install
+### Edge Case 1: Token Expiration (`401 TOKEN_EXPIRED`)
+- When a user's session token crosses the `exp` timestamp, the auth middleware catches it and immediately returns a clean, structured `401` response:
+```json
+{
+  "success": false,
+  "error": {
+    "code": "TOKEN_EXPIRED",
+    "message": "Authentication token has expired. Please log in again."
+  }
+}
 ```
+*Tested in test #10: A token issued with negative validity (`-10s`) is rejected.*
 
-### Run Server
-```bash
-npm start
+### Edge Case 2: Tampered Token Signature / Privilege Escalation (`401 INVALID_TOKEN`)
+- If an attacker tampers with the base64url payload to escalate their role from `member` to `chef`, the signature check fails via `timingSafeEqual`:
+```json
+{
+  "success": false,
+  "error": {
+    "code": "INVALID_TOKEN",
+    "message": "Token signature or structure is invalid."
+  }
+}
 ```
-The server will listen at `http://localhost:3000`.
+*Tested in test #11: Alice's valid token payload modified to `role: "chef"` fails signature verification.*
 
-### Run Automated Tests
-```bash
+### Edge Case 3: Insecure Direct Object Reference (IDOR) (`403 FORBIDDEN_RESOURCE`)
+- If User A (Alice) attempts to view or mutate User B's (Bob) grocery list (`/api/grocery-lists/list-102`), the ownership check blocks it with `403 FORBIDDEN_RESOURCE`.
+
+---
+
+## Threat Note
+
+1. **Secret Storage & Leakage (CWE-798)**:
+   - *Threat*: Hardcoding JWT signing keys in code or source control allows attackers to forge administrative tokens (`role: 'chef'`) and take over all user accounts.
+   - *Mitigation*: The app reads `process.env.JWT_SECRET`. In production, this must be injected via a secret manager (e.g. AWS Secrets Manager, GCP Secret Manager, or Doppler) and rotated periodically.
+2. **Cross-User Data Access (IDOR / BOLA - OWASP API1:2023)**:
+   - *Threat*: In recipe planning and grocery lists, guessing sequential list IDs (`list-101`, `list-102`) could expose personal dietary restrictions, allergies, and household items.
+   - *Mitigation*: The `requireListOwnershipOrChef` middleware inspects the resource owner ID against `req.user.id` on every operation.
+3. **Client-Side Token Storage**:
+   - *Threat*: Storing JWTs in browser `localStorage` exposes them to Cross-Site Scripting (XSS) extraction.
+   - *Mitigation*: For web frontends, tokens should be transported via `HttpOnly`, `Secure`, `SameSite=Strict` cookies with CSRF protection, or in-memory state with short lifetimes.
+
+---
+
+## Running Automated Tests
+
+Run the test suite with:
+```powershell
 npm test
 ```
-Executes the 12 integration test scenarios verifying validation rules, error handling, custom middleware, and business constraints.
 
-### Run Demonstration Script
-```bash
-npm run demo
-```
-Runs an end-to-end demonstration script executing valid and invalid requests against all endpoints with formatted console output.
+### Verified Test Output
+```text
+> recipe-planning-auth@1.0.0 test
+> node test/recipe-auth.test.js
 
----
+--- Recipe App Authentication & Authorization Test Suite ---
 
-## Valid and Invalid Request Demonstrations
+✔ Passed: Valid login returns JWT with 1h expiry
+✔ Passed: Login rejects incorrect password (401 INVALID_CREDENTIALS)
+✔ Passed: Protected route rejects missing token (401 UNAUTHORIZED)
+✔ Passed: Owner accesses own grocery list (200 OK)
+✔ Passed: Ownership check blocks cross-account access (403 FORBIDDEN_RESOURCE)
+✔ Passed: Chef role can inspect grocery list for culinary advice (200 OK)
+✔ Passed: Member role blocked from curating master substitutions (403 FORBIDDEN_ROLE)
+✔ Passed: Chef role successfully curates master substitutions (201 Created)
+✔ Passed: Member adds substitution to own grocery list (201 Created)
+✔ Passed (Edge Case): Expired JWT token strictly rejected (401 TOKEN_EXPIRED)
+✔ Passed (Edge Case): Tampered token signature fails verification (401 INVALID_TOKEN)
 
-### 1. Book Availability
-#### Valid Request
-```bash
-curl -i -X GET http://localhost:3000/books/book-101/availability \
-  -H "X-Request-Id: client-trace-001"
-```
-**Response (200 OK):**
-```json
-{
-  "success": true,
-  "requestId": "client-trace-001",
-  "data": {
-    "bookId": "book-101",
-    "title": "Design Patterns",
-    "author": "Gang of Four",
-    "totalCopies": 3,
-    "availableCopies": 2,
-    "activeHoldCount": 0,
-    "isAvailableForCheckout": true,
-    "recommendation": "Available for immediate checkout."
-  }
-}
-```
-
-#### Invalid Request (Malformed Book ID)
-```bash
-curl -i -X GET http://localhost:3000/books/invalid!id/availability
-```
-**Response (400 Bad Request):**
-```json
-{
-  "success": false,
-  "requestId": "a9564214-f574-4d20-a338-9566babdbb61",
-  "error": {
-    "code": "INVALID_BOOK_ID",
-    "message": "Invalid or missing 'bookId' parameter. Expected format: 'book-<id>' (e.g. 'book-101')."
-  }
-}
-```
-
----
-
-### 2. Place Hold
-#### Valid Request
-```bash
-curl -i -X POST http://localhost:3000/holds \
-  -H "Content-Type: application/json" \
-  -d '{
-    "bookId": "book-102",
-    "patronId": "patron-202",
-    "pickupLocation": "Curbside Locker"
-  }'
-```
-**Response (201 Created):**
-```json
-{
-  "success": true,
-  "requestId": "fd201c13-8321-4716-a8cd-7349b408f9e9",
-  "message": "Hold placed successfully.",
-  "data": {
-    "holdId": "hold-1795761225837",
-    "bookTitle": "Clean Architecture",
-    "patronId": "patron-202",
-    "pickupLocation": "Curbside Locker",
-    "queuePosition": 2,
-    "createdAt": "2026-11-27T06:33:45.837Z"
-  }
-}
-```
-
-#### Invalid Request (Validation Failures)
-```bash
-curl -i -X POST http://localhost:3000/holds \
-  -H "Content-Type: application/json" \
-  -d '{
-    "bookId": "invalid-book-code",
-    "patronId": "",
-    "pickupLocation": "Downtown Coffee Shop"
-  }'
-```
-**Response (400 Bad Request):**
-```json
-{
-  "success": false,
-  "requestId": "cec8a270-ded9-4ff5-8720-330fb4672c8e",
-  "error": {
-    "code": "VALIDATION_ERROR",
-    "message": "Validation failed for hold request.",
-    "details": [
-      { "field": "bookId", "message": "Must be a valid book ID string in format 'book-<id>'." },
-      { "field": "patronId", "message": "Must be a valid patron ID string in format 'patron-<id>'." },
-      { "field": "pickupLocation", "message": "Must be one of the permitted pickup locations: Main Desk, North Branch, South Branch, Curbside Locker." }
-    ]
-  }
-}
-```
-
-#### Duplicate Hold Conflict
-```bash
-curl -i -X POST http://localhost:3000/holds \
-  -H "Content-Type: application/json" \
-  -d '{
-    "bookId": "book-102",
-    "patronId": "patron-202",
-    "pickupLocation": "Curbside Locker"
-  }'
-```
-**Response (409 Conflict):**
-```json
-{
-  "success": false,
-  "requestId": "3387afb3-b6ff-474a-8731-0dc5b879f377",
-  "error": {
-    "code": "HOLD_ALREADY_EXISTS",
-    "message": "Patron 'patron-202' already has an active hold for 'book-102'.",
-    "details": {
-      "existingHoldId": "hold-1795761225837",
-      "queuePosition": 2
-    }
-  }
-}
-```
-
----
-
-### 3. Overdue Reminders
-#### Valid Request
-```bash
-curl -i -X POST http://localhost:3000/reminders/overdue \
-  -H "Content-Type: application/json" \
-  -d '{
-    "daysOverdueMin": 5,
-    "notificationChannel": "email"
-  }'
-```
-**Response (200 OK):**
-```json
-{
-  "success": true,
-  "requestId": "a632785e-e454-499e-a0a2-58b0c6788bbd",
-  "message": "Overdue reminders dispatched to 2 patron(s).",
-  "data": {
-    "criteria": {
-      "daysOverdueMin": 5,
-      "notificationChannel": "email",
-      "evaluatedAt": "2026-11-27T12:00:00.000Z"
-    },
-    "dispatchedCount": 2,
-    "dispatchedReminders": [
-      {
-        "loanId": "loan-1",
-        "patronId": "patron-12",
-        "patronEmail": "patron12@example.com",
-        "daysOverdue": 12,
-        "channel": "email",
-        "reminderSequence": 2,
-        "dispatchedAt": "2026-11-27T12:00:00.000Z"
-      },
-      {
-        "loanId": "loan-2",
-        "patronId": "patron-34",
-        "patronEmail": "patron34@example.com",
-        "daysOverdue": 7,
-        "channel": "email",
-        "reminderSequence": 1,
-        "dispatchedAt": "2026-11-27T12:00:00.000Z"
-      }
-    ]
-  }
-}
-```
-
-#### Invalid Request
-```bash
-curl -i -X POST http://localhost:3000/reminders/overdue \
-  -H "Content-Type: application/json" \
-  -d '{
-    "daysOverdueMin": -2,
-    "notificationChannel": "fax"
-  }'
-```
-**Response (400 Bad Request):**
-```json
-{
-  "success": false,
-  "requestId": "cb7ecceb-d70a-4ad2-81b2-3f15711af053",
-  "error": {
-    "code": "VALIDATION_ERROR",
-    "message": "Validation failed for overdue reminder dispatch.",
-    "details": [
-      { "field": "daysOverdueMin", "message": "Must be an integer between 1 and 365." },
-      { "field": "notificationChannel", "message": "Must be one of allowed notification channels: email, sms, in-app." }
-    ]
-  }
-}
+All 11 test scenarios passed successfully!
 ```
